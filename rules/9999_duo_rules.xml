@@ -1,0 +1,120 @@
+<!--
+  Duo Security rules for Wazuh (DuoLogSync JSON over local syslog)
+  https://github.com/FarmhouseNetworking/Duo-Wazuh-LogSync
+
+  IMPORTANT: Duo auth JSON contains both "timestamp" and "event_type", so the
+  stock Suricata rule 86600 (level 0) claims it first and the event dies there.
+  Auth parents therefore attach under 86600 (120000) with a standalone fallback
+  (120009). The 9999_ filename makes this file load AFTER the stock ruleset so
+  if_sid 86600 resolves.
+
+  "action" is a Wazuh static field - never use <field name="action">.
+-->
+<group name="duo,">
+
+  <!-- ===== Authentication log ===== -->
+  <rule id="120000" level="0">
+    <if_sid>86600</if_sid>
+    <field name="txid">\.+</field>
+    <field name="factor">\.+</field>
+    <description>Duo: authentication event</description>
+  </rule>
+
+  <rule id="120009" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="txid">\.+</field>
+    <field name="factor">\.+</field>
+    <description>Duo: authentication event</description>
+  </rule>
+
+  <rule id="120001" level="3">
+    <if_sid>120000, 120009</if_sid>
+    <field name="result">^success$</field>
+    <description>Duo: auth success - $(user.name) to $(application.name) via $(factor)</description>
+    <group>authentication_success,nist_800_171_3.5.3,</group>
+  </rule>
+
+  <rule id="120002" level="5">
+    <if_sid>120000, 120009</if_sid>
+    <field name="result">^denied$|^failure$|^error$</field>
+    <description>Duo: auth denied - $(user.name) to $(application.name) ($(reason))</description>
+    <group>authentication_failed,nist_800_171_3.5.3,</group>
+  </rule>
+
+  <rule id="120003" level="12">
+    <if_sid>120000, 120009</if_sid>
+    <field name="result">^fraud$</field>
+    <description>Duo: user reported push as FRAUD - $(user.name) from $(access_device.ip)</description>
+    <group>authentication_failed,mfa_fraud,nist_800_171_3.14.6,</group>
+  </rule>
+
+  <!-- Note: frequency windows use ARRIVAL time; a backfill can trip this. -->
+  <rule id="120004" level="10" frequency="5" timeframe="300">
+    <if_matched_sid>120002</if_matched_sid>
+    <same_field>user.name</same_field>
+    <description>Duo: 5+ denied auths in 5 min for $(user.name) - possible MFA fatigue/brute force</description>
+    <group>authentication_failures,nist_800_171_3.1.8,</group>
+  </rule>
+
+  <rule id="120005" level="8">
+    <if_sid>120000, 120009</if_sid>
+    <field name="factor">bypass_code|remembered_device</field>
+    <field name="result">^success$</field>
+    <description>Duo: auth via $(factor) for $(user.name) - verify expected</description>
+  </rule>
+
+  <!-- ===== Activity log (admin panel, config changes, directory sync) ===== -->
+  <rule id="120030" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="activity_id">\.+</field>
+    <field name="action.name">\.+</field>
+    <description>Duo activity: $(actor.name) ($(actor.type)) - $(action.name) on $(target.type) $(target.name) [$(outcome.result)]</description>
+    <group>duo_activity,nist_800_171_3.3.1,</group>
+  </rule>
+
+  <rule id="120031" level="5">
+    <if_sid>120030</if_sid>
+    <field name="action.name">^admin_login</field>
+    <field name="outcome.result">FAIL</field>
+    <description>Duo admin panel: FAILED login by $(actor.name) from $(access_device.ip.address)</description>
+    <group>duo_activity,authentication_failed,nist_800_171_3.1.8,</group>
+  </rule>
+
+  <rule id="120032" level="10" frequency="3" timeframe="300">
+    <if_matched_sid>120031</if_matched_sid>
+    <same_field>actor.name</same_field>
+    <description>Duo admin panel: 3+ failed logins in 5 min for $(actor.name)</description>
+    <group>duo_activity,authentication_failures,nist_800_171_3.1.8,</group>
+  </rule>
+
+  <rule id="120033" level="10">
+    <if_sid>120030</if_sid>
+    <field name="action.name">bypass|admin_create|admin_delete|admin_update|admin_role|integration_create|integration_delete|integration_update|policy|user_delete|settings|trusted|directory_sync</field>
+    <description>Duo config change: $(action.name) by $(actor.name) on $(target.type) $(target.name)</description>
+    <group>duo_activity,config_changed,nist_800_171_3.4.3,nist_800_171_3.1.7,</group>
+  </rule>
+
+  <rule id="120034" level="8">
+    <if_sid>120030</if_sid>
+    <field name="action.name">^ad_sync_finish$</field>
+    <field name="outcome.result">FAIL</field>
+    <description>Duo: AD directory sync FAILED - disabled/removed AD users may remain active in Duo</description>
+    <group>duo_activity,account_management,nist_800_171_3.1.1,nist_800_171_3.5.6,</group>
+  </rule>
+
+  <!-- ===== Telephony log (credit usage; low value, unverified field match) ===== -->
+  <rule id="120020" level="2">
+    <if_sid>86600</if_sid>
+    <field name="context">\.+</field>
+    <field name="credits">\.+</field>
+    <description>Duo telephony: $(type) to $(phone) ($(context))</description>
+  </rule>
+
+  <rule id="120021" level="2">
+    <decoded_as>json</decoded_as>
+    <field name="context">\.+</field>
+    <field name="credits">\.+</field>
+    <description>Duo telephony: $(type) to $(phone) ($(context))</description>
+  </rule>
+
+</group>
